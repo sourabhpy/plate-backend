@@ -1,0 +1,44 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: plate_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: plate_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - plate_pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: .
+    container_name: plate_backend
+    restart: always
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py seed_plate_data &&
+             gunicorn --bind 0.0.0.0:8000 --workers 3 plate.wsgi:application"
+    volumes:
+      - .:/app
+      - plate_media:/app/media
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - ISLOCALMACHINE=False
+      - DATABASE_NAME=plate_db
+      - DATABASE_USER=postgres
+      - DATABASE_PASSWORD=postgrespassword
+      - DATABASE_HOST=db
+      - DATABASE_PORT=5432
+      - DEBUG=True
+      - SECRET_KEY=plate-docker-secret-key-change-in-production-88219
+      - ALLOWED_HOSTS=*
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+    depends_on:
+      - db
+
+volumes:
+  plate_pgdata:
+  plate_media:
