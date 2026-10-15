@@ -16,7 +16,7 @@ class Command(BaseCommand):
 
         # 1. Users
         users_data = [
-            {"username": "sourabh", "email": "saurabhsharmasg76@gmail.com", "name": "Sourabh Sharma", "role": "admin", "title": "Founder & Admin", "password": "admin", "is_staff": True, "is_superuser": True},
+            {"username": "admin", "email": "admin@acme.com", "name": "System Admin", "role": "admin", "title": "Founder & Admin", "password": "admin", "is_staff": True, "is_superuser": True},
             {"username": "alex", "email": "alex@acme.com", "name": "Alex Chen", "role": "admin", "title": "Tech Lead", "password": "Plate123!"},
             {"username": "elena", "email": "elena@acme.com", "name": "Elena Rostova", "role": "member", "title": "Principal Designer", "password": "Plate123!"},
             {"username": "marcus", "email": "marcus@acme.com", "name": "Marcus Vance", "role": "member", "title": "Senior Backend Eng", "password": "Plate123!"},
@@ -44,7 +44,7 @@ class Command(BaseCommand):
             user.save()
             users[u["email"]] = (user, u["role"], u["title"])
 
-        admin_user = users["saurabhsharmasg76@gmail.com"][0]
+        admin_user = users["admin@acme.com"][0]
 
         # 2. Workspace
         workspace, created = Workspace.objects.get_or_create(

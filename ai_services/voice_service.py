@@ -36,7 +36,7 @@ class VoiceExtractionService:
 
         # Intelligent transcription fallback: if file has readable text or fallback placeholder
         return (
-            "Team sync: We agreed that Sourabh will prepare the database migration by Friday. "
+            "Team sync: We agreed that Alex will prepare the database migration by Friday. "
             "Elena will finalize the UI design system and drag-and-drop interactions. "
             "The blocker is waiting for the cloud API credentials. "
             "We decided to postpone the billing integration until next sprint."
