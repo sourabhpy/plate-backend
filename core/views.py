@@ -1,4 +1,5 @@
 from rest_framework import status, views, permissions
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
@@ -33,7 +34,7 @@ class RegisterView(views.APIView):
             membership = WorkspaceMember.objects.filter(user=user).select_related("workspace").first()
             return Response(
                 {
-                    "user": UserSerializer(user).data,
+                    "user": UserSerializer(user, context={"request": request}).data,
                     "tokens": tokens,
                     "workspace": WorkspaceSerializer(membership.workspace, context={"request": request}).data if membership else None,
                 },
@@ -70,7 +71,7 @@ class LoginView(views.APIView):
 
         return Response(
             {
-                "user": UserSerializer(user).data,
+                "user": UserSerializer(user, context={"request": request}).data,
                 "tokens": tokens,
                 "workspaces": WorkspaceSerializer(workspaces, many=True, context={"request": request}).data,
                 "active_workspace": WorkspaceSerializer(active_workspace, context={"request": request}).data if active_workspace else None,
@@ -81,6 +82,7 @@ class LoginView(views.APIView):
 
 class MeView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
         memberships = WorkspaceMember.objects.filter(user=request.user, status="active").select_related("workspace")
@@ -95,10 +97,60 @@ class MeView(views.APIView):
 
         return Response(
             {
-                "user": UserSerializer(request.user).data,
+                "user": UserSerializer(request.user, context={"request": request}).data,
                 "workspaces": WorkspaceSerializer(workspaces, many=True, context={"request": request}).data,
-                "active_member": WorkspaceMemberSerializer(active_member).data if active_member else None,
+                "active_member": WorkspaceMemberSerializer(active_member, context={"request": request}).data if active_member else None,
             }
+        )
+
+    def patch(self, request):
+        user = request.user
+
+        # Email cannot be changed as it is a primary value
+        requested_email = request.data.get("email")
+        if requested_email and requested_email.strip().lower() != user.email.lower():
+            return Response(
+                {"error": "Email cannot be changed as it is a primary identifier."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        name = request.data.get("name")
+        if name is not None:
+            user.name = name.strip()
+
+        # Handle avatar upload or removal
+        if "avatar" in request.FILES:
+            user.avatar = request.FILES["avatar"]
+        elif str(request.data.get("remove_avatar")).lower() in ["true", "1", "yes"]:
+            if user.avatar:
+                user.avatar.delete(save=False)
+            user.avatar = None
+
+        # Handle password update
+        new_password = request.data.get("password") or request.data.get("new_password")
+        if new_password:
+            if len(new_password) < 6:
+                return Response(
+                    {"error": "New password must be at least 6 characters long."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            current_password = request.data.get("current_password")
+            if current_password:
+                if not user.check_password(current_password):
+                    return Response(
+                        {"error": "Current password is incorrect."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            user.set_password(new_password)
+
+        user.save()
+
+        return Response(
+            {
+                "user": UserSerializer(user, context={"request": request}).data,
+                "message": "Profile updated successfully",
+            },
+            status=status.HTTP_200_OK,
         )
 
 
@@ -111,11 +163,28 @@ class WorkspaceListView(views.APIView):
         return Response(WorkspaceSerializer(workspaces, many=True, context={"request": request}).data)
 
     def post(self, request):
+        # Enforce admin privilege: user must be an admin of their active workspace or an admin in at least one workspace / staff
+        active_ws_id = request.headers.get("X-Workspace-ID")
+        if active_ws_id:
+            is_admin = WorkspaceMember.objects.filter(
+                workspace_id=active_ws_id, user=request.user, role="admin", status="active"
+            ).exists()
+        else:
+            is_admin = WorkspaceMember.objects.filter(
+                user=request.user, role="admin", status="active"
+            ).exists() or request.user.is_staff or request.user.is_superuser
+
+        if not is_admin:
+            return Response(
+                {"error": "Only admins have permission to create workspaces."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         name = request.data.get("name")
-        if not name:
+        if not name or not name.strip():
             return Response({"error": "Workspace name is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        workspace = Workspace.objects.create(name=name, owner=request.user)
+        workspace = Workspace.objects.create(name=name.strip(), owner=request.user)
         WorkspaceMember.objects.create(
             workspace=workspace,
             user=request.user,
@@ -142,40 +211,59 @@ class WorkspaceDetailView(views.APIView):
         workspace = get_object_or_404(Workspace, pk=pk)
         name = request.data.get("name")
         if name:
-            workspace.name = name
+            workspace.name = name.strip()
             workspace.save()
         return Response(WorkspaceSerializer(workspace, context={"request": request}).data)
 
 
 class WorkspaceMembersView(views.APIView):
     permission_classes = [IsWorkspaceMember]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
         members = WorkspaceMember.objects.filter(
             workspace=request.workspace, status="active"
         ).select_related("user").order_by("joined_at")
-        return Response(WorkspaceMemberSerializer(members, many=True).data)
+        return Response(WorkspaceMemberSerializer(members, many=True, context={"request": request}).data)
 
     def post(self, request):
         if request.member.role != "admin":
-            return Response({"error": "Only admins can invite members"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": "Only admins can add members to this workspace"}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = InviteMemberSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         email = serializer.validated_data["email"].lower().strip()
-        name = serializer.validated_data.get("name") or email.split("@")[0]
+        name = serializer.validated_data.get("name", "").strip() or email.split("@")[0]
         role = serializer.validated_data.get("role", "member")
         title = serializer.validated_data.get("title", "Team Member")
+        password = serializer.validated_data.get("password") or request.data.get("password")
+        avatar_file = request.FILES.get("avatar")
 
-        user, created = User.objects.get_or_create(
-            email=email,
-            defaults={"name": name}
-        )
-        if created:
-            user.set_password("Plate123!")
+        if not password or len(password) < 6:
+            return Response(
+                {"error": "Password is required and must be at least 6 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = User.objects.filter(email=email).first()
+        if user:
+            if name:
+                user.name = name
+            user.set_password(password)
+            if avatar_file:
+                user.avatar = avatar_file
             user.save()
+        else:
+            user = User.objects.create_user(
+                email=email,
+                name=name,
+                password=password,
+            )
+            if avatar_file:
+                user.avatar = avatar_file
+                user.save()
 
         member, member_created = WorkspaceMember.objects.get_or_create(
             workspace=request.workspace,
@@ -192,4 +280,5 @@ class WorkspaceMembersView(views.APIView):
             member.status = "active"
             member.save()
 
-        return Response(WorkspaceMemberSerializer(member).data, status=status.HTTP_201_CREATED)
+        return Response(WorkspaceMemberSerializer(member, context={"request": request}).data, status=status.HTTP_201_CREATED)
+

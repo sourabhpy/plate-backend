@@ -3,10 +3,24 @@ from .models import User, Workspace, WorkspaceMember
 
 
 class UserSerializer(serializers.ModelSerializer):
+    avatar_url = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ["id", "username", "email", "name", "avatar", "date_joined"]
-        read_only_fields = ["id", "date_joined"]
+        fields = ["id", "username", "email", "name", "avatar", "avatar_url", "date_joined"]
+        read_only_fields = ["id", "email", "date_joined"]
+
+    def get_avatar_url(self, obj):
+        if not obj.avatar:
+            return None
+        request = self.context.get("request")
+        if request:
+            try:
+                return request.build_absolute_uri(obj.avatar.url)
+            except Exception:
+                pass
+        return obj.avatar.url
+
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -71,5 +85,8 @@ class WorkspaceMemberSerializer(serializers.ModelSerializer):
 class InviteMemberSerializer(serializers.Serializer):
     email = serializers.EmailField()
     name = serializers.CharField(required=False, default="")
+    password = serializers.CharField(required=False, allow_blank=True, min_length=6)
     role = serializers.ChoiceField(choices=["admin", "member"], default="member")
     title = serializers.CharField(required=False, default="Team Member")
+    avatar = serializers.ImageField(required=False, allow_null=True)
+

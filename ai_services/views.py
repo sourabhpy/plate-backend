@@ -86,6 +86,10 @@ class ExtractTaskFromMessageView(views.APIView):
         content = message.content
         if message.message_type == "audio" and message.audio_file and not content:
             content = VoiceExtractionService.transcribe_audio_file(message.audio_file.path)
+        elif message.message_type == "file" and message.file and not content:
+            file_name = (message.file_name or message.file.name).lower()
+            if any(file_name.endswith(ext) for ext in [".webm", ".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"]):
+                content = VoiceExtractionService.transcribe_audio_file(message.file.path)
 
         extracted_data = VoiceExtractionService.extract_structured_tasks(
             transcript=content,
