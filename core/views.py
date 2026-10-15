@@ -230,6 +230,73 @@ class WorkspaceMembersView(views.APIView):
         if request.member.role != "admin":
             return Response({"error": "Only admins can add members to this workspace"}, status=status.HTTP_403_FORBIDDEN)
 
+        # 1. Bulk include existing system users by user_ids
+        user_ids = request.data.get("user_ids")
+        if isinstance(user_ids, str):
+            try:
+                import json
+                user_ids = json.loads(user_ids)
+            except Exception:
+                user_ids = [uid.strip() for uid in user_ids.split(",") if uid.strip()]
+        elif hasattr(request.data, "getlist") and not isinstance(user_ids, list):
+            user_ids = request.data.getlist("user_ids") or request.data.getlist("user_ids[]")
+
+        if user_ids and isinstance(user_ids, list):
+            added_members = []
+            default_role = request.data.get("role", "member")
+            if default_role not in ["admin", "member"]:
+                default_role = "member"
+
+            for uid in user_ids:
+                target_user = User.objects.filter(id=uid).first()
+                if target_user:
+                    member, _ = WorkspaceMember.objects.get_or_create(
+                        workspace=request.workspace,
+                        user=target_user,
+                        defaults={
+                            "role": default_role,
+                            "title": "Team Member",
+                            "status": "active",
+                        }
+                    )
+                    if member.status != "active":
+                        member.status = "active"
+                        member.save()
+                    added_members.append(member)
+            return Response(
+                WorkspaceMemberSerializer(added_members, many=True, context={"request": request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        # 2. Include a single existing system user by user_id
+        user_id = request.data.get("user_id")
+        if user_id:
+            target_user = get_object_or_404(User, id=user_id)
+            role = request.data.get("role", "member")
+            title = request.data.get("title", "Team Member")
+            if role not in ["admin", "member"]:
+                role = "member"
+
+            member, _ = WorkspaceMember.objects.get_or_create(
+                workspace=request.workspace,
+                user=target_user,
+                defaults={
+                    "role": role,
+                    "title": title,
+                    "status": "active",
+                }
+            )
+            member.role = role
+            member.title = title
+            member.status = "active"
+            member.save()
+
+            return Response(
+                WorkspaceMemberSerializer(member, context={"request": request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        # 3. Create or invite new user via email and credentials
         serializer = InviteMemberSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -281,4 +348,116 @@ class WorkspaceMembersView(views.APIView):
             member.save()
 
         return Response(WorkspaceMemberSerializer(member, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        if request.member.role != "admin":
+            return Response(
+                {"error": "Only admins can remove members from this workspace."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        member_id = request.data.get("member_id") or request.query_params.get("member_id")
+        user_id = request.data.get("user_id") or request.query_params.get("user_id")
+
+        if not member_id and not user_id:
+            return Response(
+                {"error": "member_id or user_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if member_id:
+            member = get_object_or_404(WorkspaceMember, id=member_id, workspace=request.workspace)
+        else:
+            member = get_object_or_404(WorkspaceMember, user_id=user_id, workspace=request.workspace)
+
+        if member.workspace.owner == member.user:
+            return Response(
+                {"error": "The workspace owner cannot be removed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        member.delete()
+        return Response(
+            {"message": "Member removed successfully from workspace."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class WorkspaceMemberDetailView(views.APIView):
+    permission_classes = [IsWorkspaceMember]
+
+    def delete(self, request, pk):
+        if request.member.role != "admin":
+            return Response(
+                {"error": "Only admins can remove members from this workspace."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        member = get_object_or_404(WorkspaceMember, pk=pk, workspace=request.workspace)
+
+        if member.workspace.owner == member.user:
+            return Response(
+                {"error": "The workspace owner cannot be removed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        member.delete()
+        return Response(
+            {"message": "Member removed successfully from workspace."},
+            status=status.HTTP_200_OK,
+        )
+
+    def patch(self, request, pk):
+        if request.member.role != "admin":
+            return Response(
+                {"error": "Only admins can update member roles."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        member = get_object_or_404(WorkspaceMember, pk=pk, workspace=request.workspace)
+        role = request.data.get("role")
+        title = request.data.get("title")
+        if role in ["admin", "member"]:
+            member.role = role
+        if title is not None:
+            member.title = title.strip()
+        member.save()
+        return Response(WorkspaceMemberSerializer(member, context={"request": request}).data)
+
+
+class SystemUsersView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        workspace_id = (
+            request.headers.get("X-Workspace-ID")
+            or request.query_params.get("workspace_id")
+        )
+        users = User.objects.filter(is_active=True).order_by("name")
+
+        member_map = {}
+        if workspace_id:
+            members = WorkspaceMember.objects.filter(
+                workspace_id=workspace_id, status="active"
+            ).values("id", "user_id", "role", "title")
+            for m in members:
+                member_map[str(m["user_id"])] = {
+                    "member_id": str(m["id"]),
+                    "role": m["role"],
+                    "title": m["title"],
+                }
+
+        results = []
+        for user in users:
+            u_data = UserSerializer(user, context={"request": request}).data
+            u_id_str = str(user.id)
+            is_in = u_id_str in member_map
+            u_data["is_in_workspace"] = is_in
+            if is_in:
+                u_data["member_id"] = member_map[u_id_str]["member_id"]
+                u_data["role"] = member_map[u_id_str]["role"]
+                u_data["title"] = member_map[u_id_str]["title"]
+            results.append(u_data)
+
+        return Response(results)
+
 

@@ -131,3 +131,57 @@ class CoreAuthAndWorkspaceTests(TestCase):
         self.assertEqual(user.name, "Updated Name")
         self.assertTrue(user.check_password("BrandNewPassword123!"))
 
+    def test_system_users_and_workspace_member_management(self):
+        admin = User.objects.create_user(email="owner@test.com", password="Pass123!", name="Owner")
+        ws = Workspace.objects.create(name="Design Studio", owner=admin)
+        WorkspaceMember.objects.create(workspace=ws, user=admin, role="admin", status="active")
+
+        # Two existing system users not yet in this workspace
+        user_a = User.objects.create_user(email="user_a@test.com", password="Pass123!", name="User A")
+        user_b = User.objects.create_user(email="user_b@test.com", password="Pass123!", name="User B")
+
+        self.client.force_authenticate(user=admin)
+
+        # 1. List system users with workspace context
+        res = self.client.get("/api/auth/users/", HTTP_X_WORKSPACE_ID=str(ws.id))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        user_ids_in_res = [u["id"] for u in res.data]
+        self.assertIn(str(user_a.id), user_ids_in_res)
+        # Verify is_in_workspace flag
+        admin_item = next(u for u in res.data if u["id"] == str(admin.id))
+        self.assertTrue(admin_item["is_in_workspace"])
+        user_a_item = next(u for u in res.data if u["id"] == str(user_a.id))
+        self.assertFalse(user_a_item["is_in_workspace"])
+
+        # 2. Admin includes existing user_a into workspace
+        res = self.client.post(
+            "/api/auth/members/",
+            {"user_id": str(user_a.id), "role": "member", "title": "Senior Designer"},
+            HTTP_X_WORKSPACE_ID=str(ws.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(WorkspaceMember.objects.filter(workspace=ws, user=user_a).exists())
+
+        # 3. Admin bulk includes user_b into workspace
+        res = self.client.post(
+            "/api/auth/members/",
+            {"user_ids": [str(user_b.id)]},
+            format="json",
+            HTTP_X_WORKSPACE_ID=str(ws.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(WorkspaceMember.objects.filter(workspace=ws, user=user_b).exists())
+
+        # 4. Admin removes user_a from workspace
+        member_a = WorkspaceMember.objects.get(workspace=ws, user=user_a)
+        res = self.client.delete(f"/api/auth/members/{member_a.id}/", HTTP_X_WORKSPACE_ID=str(ws.id))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(WorkspaceMember.objects.filter(workspace=ws, user=user_a).exists())
+
+        # 5. Non-admin cannot remove members
+        self.client.force_authenticate(user=user_b)
+        member_b = WorkspaceMember.objects.get(workspace=ws, user=user_b)
+        res = self.client.delete(f"/api/auth/members/{member_b.id}/", HTTP_X_WORKSPACE_ID=str(ws.id))
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+
