@@ -75,6 +75,7 @@ class Message(models.Model):
     content_type = models.CharField(max_length=100, blank=True, default="")
 
     is_edited = models.BooleanField(default=False)
+    is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(default=timezone.now, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

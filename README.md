@@ -45,7 +45,7 @@ Execute all unit and integration tests across all applications:
 ```bash
 python manage.py test
 ```
-For detailed descriptions of all test cases, multi-tenant security verification, and app-by-app commands, see [TESTING.md](file:///Users/sourabhsharma/Documents/plate/plate-backend/TESTING.md).
+For detailed descriptions of all test cases, multi-tenant security verification, and app-by-app commands, see TESTING.md.
 
 ## Running with Docker
 ```bash

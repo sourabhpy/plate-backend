@@ -165,11 +165,13 @@ class MessageListCreateView(views.APIView):
                 after_id_int = int(after_id)
                 new_messages = list(messages.filter(id__gt=after_id_int).order_by("id")[:limit])
                 latest_id = max([m.id for m in new_messages]) if new_messages else after_id_int
+                deleted_ids = list(messages.filter(is_deleted=True).values_list("id", flat=True))
                 return Response({
                     "results": MessageSerializer(new_messages, many=True, context={"request": request}).data,
                     "latest_id": latest_id,
                     "poll_cursor": latest_id,
                     "count": len(new_messages),
+                    "deleted_ids": deleted_ids,
                 })
             except ValueError:
                 return Response({"error": "Invalid after_id"}, status=status.HTTP_400_BAD_REQUEST)
@@ -276,11 +278,25 @@ class MessageDetailView(views.APIView):
 
     def delete(self, request, pk):
         message = get_object_or_404(Message, id=pk, conversation__workspace=request.workspace)
-        if message.sender != request.user and request.member.role != "admin":
-            return Response({"error": "You cannot delete this message"}, status=status.HTTP_403_FORBIDDEN)
+        if message.sender != request.user:
+            return Response({"error": "You can only delete your own messages"}, status=status.HTTP_403_FORBIDDEN)
 
-        message.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        message.is_deleted = True
+        message.content = "This message was deleted"
+        if message.audio_file:
+            try:
+                message.audio_file.delete(save=False)
+            except Exception:
+                pass
+            message.audio_file = None
+        if message.file:
+            try:
+                message.file.delete(save=False)
+            except Exception:
+                pass
+            message.file = None
+        message.save()
+        return Response(MessageSerializer(message, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
 class MessageSearchView(views.APIView):
