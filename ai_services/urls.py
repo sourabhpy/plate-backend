@@ -14,5 +14,7 @@ urlpatterns = [
     path("tasks/commit-extracted/", CommitExtractedTasksView.as_view(), name="commit-extracted-tasks"),
     path("documents/analyze/", DocumentAnalyzeView.as_view(), name="document-analyze"),
     path("memory/ask/", AskTeamMemoryView.as_view(), name="memory-ask"),
+    path("ask-memory/", AskTeamMemoryView.as_view(), name="ask-memory"),
     path("memory/index-batch/", IndexWorkspaceContentBatchView.as_view(), name="memory-index-batch"),
+    path("batch-index/", IndexWorkspaceContentBatchView.as_view(), name="batch-index"),
 ]
