@@ -254,6 +254,17 @@ class MessageListCreateView(views.APIView):
         conv.updated_at = message.created_at
         conv.save(update_fields=["updated_at"])
 
+        # Check and notify mentioned users
+        if content:
+            from notifications.services import NotificationService
+            conv_name = conv.name or getattr(conv, "display_name", "") or ("chat" if conv.type != "dm" else f"Direct Message")
+            NotificationService.notify_chat_mentions(
+                workspace=request.workspace,
+                actor=request.user,
+                content=content,
+                conversation_name=conv_name,
+            )
+
         return Response(
             MessageSerializer(message, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
@@ -270,9 +281,27 @@ class MessageDetailView(views.APIView):
 
         content = request.data.get("content")
         if content is not None:
-            message.content = content.strip()
+            old_content = message.content or ""
+            new_content = content.strip()
+            message.content = new_content
             message.is_edited = True
             message.save()
+
+            if new_content:
+                from notifications.services import NotificationService, extract_mentioned_users
+                old_mentioned_ids = {u.id for u in extract_mentioned_users(old_content, request.workspace, actor=request.user)}
+                new_mentioned = extract_mentioned_users(new_content, request.workspace, actor=request.user)
+                conv = message.conversation
+                conv_name = conv.name or getattr(conv, "display_name", "") or ("chat" if conv.type != "dm" else "Direct Message")
+                for recipient in new_mentioned:
+                    if recipient.id not in old_mentioned_ids:
+                        NotificationService.notify_chat_mention(
+                            workspace=request.workspace,
+                            actor=request.user,
+                            recipient=recipient,
+                            message_content=new_content,
+                            conversation_name=conv_name,
+                        )
 
         return Response(MessageSerializer(message, context={"request": request}).data)
 

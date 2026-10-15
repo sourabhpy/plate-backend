@@ -93,3 +93,106 @@ class CommunicationsPollingAndPrivacyTests(TestCase):
         url = f"/api/communications/conversations/{self.dm.id}/messages/"
         res = self.client.get(url, **headers)
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ChatMentionNotificationTests(TestCase):
+    def setUp(self):
+        from django.core import mail
+        mail.outbox.clear()
+        self.client = APIClient()
+        self.alice = User.objects.create_user(email="alice@team.com", username="alice", password="Pass1!", name="Alice Walker")
+        self.bob = User.objects.create_user(email="bob@team.com", username="bob", password="Pass2!", name="Bob Ross")
+        self.eve = User.objects.create_user(email="eve@team.com", username="eve", password="Pass3!", name="Eve")
+
+        self.workspace = Workspace.objects.create(name="Productivity Co", owner=self.alice)
+        WorkspaceMember.objects.create(workspace=self.workspace, user=self.alice, role="admin", status="active")
+        WorkspaceMember.objects.create(workspace=self.workspace, user=self.bob, role="member", status="active")
+        WorkspaceMember.objects.create(workspace=self.workspace, user=self.eve, role="member", status="active")
+
+        self.channel = Conversation.objects.create(
+            workspace=self.workspace, type="channel", name="general", created_by=self.alice
+        )
+        ConversationMember.objects.create(conversation=self.channel, user=self.alice)
+        ConversationMember.objects.create(conversation=self.channel, user=self.bob)
+        ConversationMember.objects.create(conversation=self.channel, user=self.eve)
+
+    def test_mention_creates_notification_and_sends_email(self):
+        from django.core import mail
+        from notifications.models import Notification
+
+        self.client.force_authenticate(user=self.alice)
+        headers = {"HTTP_X_WORKSPACE_ID": str(self.workspace.id)}
+
+        url = f"/api/communications/conversations/{self.channel.id}/messages/"
+        response = self.client.post(
+            url,
+            {"content": "Hey @bob and @Bob Ross, please check the new deployment!"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        # Bob should receive exactly 1 mention notification (deduplicated)
+        notifications = Notification.objects.filter(recipient=self.bob, notification_type="mention")
+        self.assertEqual(notifications.count(), 1)
+        notif = notifications.first()
+        self.assertEqual(notif.actor, self.alice)
+        self.assertIn("Alice Walker tagged you", notif.title)
+        self.assertIn("Hey @bob and @Bob Ross", notif.message)
+
+        # Alice should NOT receive a notification for tagging
+        self.assertEqual(Notification.objects.filter(recipient=self.alice).count(), 0)
+
+        # Email should have been sent to Bob
+        self.assertEqual(len(mail.outbox), 1)
+        email = mail.outbox[0]
+        self.assertEqual(email.to, ["bob@team.com"])
+        self.assertIn("[Plate]", email.subject)
+        self.assertIn("tagged you in a chat", email.subject)
+
+    def test_self_mention_does_not_notify_sender(self):
+        from django.core import mail
+        from notifications.models import Notification
+
+        self.client.force_authenticate(user=self.alice)
+        headers = {"HTTP_X_WORKSPACE_ID": str(self.workspace.id)}
+
+        url = f"/api/communications/conversations/{self.channel.id}/messages/"
+        response = self.client.post(
+            url,
+            {"content": "Note to self: @alice remember to check this"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.assertEqual(Notification.objects.filter(recipient=self.alice).count(), 0)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_editing_message_notifies_newly_mentioned_user(self):
+        from django.core import mail
+        from notifications.models import Notification
+
+        self.client.force_authenticate(user=self.alice)
+        headers = {"HTTP_X_WORKSPACE_ID": str(self.workspace.id)}
+
+        msg = Message.objects.create(
+            conversation=self.channel,
+            sender=self.alice,
+            content="Hello everyone",
+        )
+
+        patch_url = f"/api/communications/messages/{msg.id}/"
+        response = self.client.patch(
+            patch_url,
+            {"content": "Hello everyone, cc @eve!"},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        eve_notifs = Notification.objects.filter(recipient=self.eve, notification_type="mention")
+        self.assertEqual(eve_notifs.count(), 1)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["eve@team.com"])
+
