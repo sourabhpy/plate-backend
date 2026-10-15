@@ -196,3 +196,21 @@ class ChatMentionNotificationTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["eve@team.com"])
 
+    def test_chat_message_rejects_video_file(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.alice)
+        headers = {"HTTP_X_WORKSPACE_ID": str(self.workspace.id)}
+
+        video_file = SimpleUploadedFile("screen_recording.mp4", b"fake mp4 video bytes", content_type="video/mp4")
+        url = f"/api/communications/conversations/{self.channel.id}/messages/"
+        res = self.client.post(
+            url,
+            {"file": video_file, "message_type": "file"},
+            format="multipart",
+            **headers,
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Video files are not allowed", res.data["error"])
+
+

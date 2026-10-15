@@ -2,6 +2,7 @@ import re
 import json
 import logging
 from django.utils import timezone
+from django.conf import settings
 from core.models import WorkspaceMember
 from .gemini_client import generate_content, get_genai_client
 

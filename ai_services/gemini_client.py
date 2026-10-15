@@ -56,20 +56,24 @@ def generate_content(prompt, system_instruction=None):
 def generate_embedding(text):
     """
     Generate normalized float embedding vector.
-    Uses Gemini text-embedding-004 if available, or a deterministic text embedding fallback.
+    Uses Gemini embedding models (e.g. gemini-embedding-001) if available, or a deterministic fallback.
     """
     client = get_genai_client()
     if client:
-        try:
-            response = client.models.embed_content(
-                model="text-embedding-004",
-                contents=text,
-            )
-            if hasattr(response, "embedding") and hasattr(response.embedding, "values"):
-                vec = list(response.embedding.values)
-                return vec
-        except Exception as e:
-            logger.warning(f"Gemini embed_content failed: {e}. Falling back to deterministic vector.")
+        for model_id in ["gemini-embedding-001", "text-embedding-004"]:
+            try:
+                response = client.models.embed_content(
+                    model=model_id,
+                    contents=text,
+                )
+                if hasattr(response, "embeddings") and response.embeddings:
+                    first_emb = response.embeddings[0]
+                    if hasattr(first_emb, "values") and first_emb.values:
+                        return list(first_emb.values)
+                if hasattr(response, "embedding") and hasattr(response.embedding, "values"):
+                    return list(response.embedding.values)
+            except Exception as e:
+                logger.debug(f"Gemini embed_content with {model_id} failed: {e}")
 
     # High quality deterministic pseudo-embedding fallback for dev / tests
     # Hashes tokens into a 64-dimensional dense float vector with L2 normalization

@@ -6,6 +6,7 @@ from core.permissions import IsWorkspaceMember
 from core.models import WorkspaceMember, User
 from .models import Conversation, ConversationMember, Message
 from .serializers import ConversationSerializer, MessageSerializer
+from core.media_validators import validate_max_file_size, validate_not_video
 
 
 class ConversationListCreateView(views.APIView):
@@ -228,8 +229,22 @@ class MessageListCreateView(views.APIView):
         content_type = ""
 
         if audio_file:
+            is_not_video, video_err = validate_not_video(audio_file)
+            if not is_not_video:
+                return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+
+            is_valid_size, size_err = validate_max_file_size(audio_file, label="Audio file")
+            if not is_valid_size:
+                return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
             message_type = "audio"
         elif file_obj:
+            is_not_video, video_err = validate_not_video(file_obj)
+            if not is_not_video:
+                return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+
+            is_valid_size, size_err = validate_max_file_size(file_obj, label="File attachment")
+            if not is_valid_size:
+                return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
             message_type = "file"
             file_name = file_obj.name
             file_size = file_obj.size

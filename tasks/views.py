@@ -11,6 +11,7 @@ from .serializers import (
     TaskAttachmentSerializer,
 )
 from notifications.services import NotificationService
+from core.media_validators import validate_max_file_size, validate_not_video
 
 
 class ProjectListCreateView(views.APIView):
@@ -362,6 +363,14 @@ class TaskAttachmentUploadView(views.APIView):
         file_obj = request.FILES.get("file")
         if not file_obj:
             return Response({"error": "File is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_not_video, video_err = validate_not_video(file_obj)
+        if not is_not_video:
+            return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_valid_size, size_err = validate_max_file_size(file_obj, label="Attachment file")
+        if not is_valid_size:
+            return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
 
         attachment = TaskAttachment.objects.create(
             task=task,

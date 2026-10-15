@@ -2,7 +2,7 @@ import os
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from core.permissions import IsWorkspaceMember
+from core.permissions import IsWorkspaceMember, IsWorkspaceAdmin
 from core.models import WorkspaceMember
 from tasks.models import Task, TaskActivity
 from communications.models import Message
@@ -10,13 +10,26 @@ from .models import DocumentAnalysis, VoiceExtraction, TeamMemoryChunk
 from .voice_service import VoiceExtractionService
 from .document_service import DocumentAnalysisService
 from .rag_service import TeamMemoryRAGService
+from .serializers import DocumentAnalysisSerializer, VoiceExtractionSerializer
 from notifications.services import NotificationService
+from core.media_validators import (
+    validate_max_file_size,
+    validate_not_video,
+    get_audio_duration_seconds,
+    MAX_AUDIO_ANALYSIS_DURATION_SECONDS,
+)
 
 
 class VoiceTranscribeAndExtractView(views.APIView):
     permission_classes = [IsWorkspaceMember]
 
     def post(self, request):
+        if len(request.FILES) > 1:
+            return Response(
+                {"error": "Only one audio file can be processed at a time."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         audio_file = request.FILES.get("audio") or request.FILES.get("audio_file")
         transcript_text = request.data.get("transcript")
         is_direct_recording = str(request.data.get("is_direct_recording", "true")).lower() == "true"
@@ -26,6 +39,24 @@ class VoiceTranscribeAndExtractView(views.APIView):
                 {"error": "Audio file or transcript text is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if audio_file:
+            is_not_video, video_err = validate_not_video(audio_file)
+            if not is_not_video:
+                return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+
+            is_valid_size, size_err = validate_max_file_size(audio_file, label="Audio file")
+            if not is_valid_size:
+                return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
+
+            duration = get_audio_duration_seconds(audio_file)
+            if duration is not None and duration > (MAX_AUDIO_ANALYSIS_DURATION_SECONDS + 0.5):
+                return Response(
+                    {
+                        "error": f"Audio exceeds the 1-minute limit ({int(round(duration))}s). Please provide an audio recording under 60 seconds."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         extraction_record = VoiceExtraction.objects.create(
             workspace=request.workspace,
@@ -196,9 +227,23 @@ class DocumentAnalyzeView(views.APIView):
     permission_classes = [IsWorkspaceMember]
 
     def post(self, request):
+        if len(request.FILES) > 1:
+            return Response(
+                {"error": "Only one document can be analyzed at a time."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         file_obj = request.FILES.get("file")
         if not file_obj:
             return Response({"error": "File is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_not_video, video_err = validate_not_video(file_obj)
+        if not is_not_video:
+            return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_valid_size, size_err = validate_max_file_size(file_obj, label="Document file")
+        if not is_valid_size:
+            return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
 
         doc = DocumentAnalysis.objects.create(
             workspace=request.workspace,
@@ -225,15 +270,8 @@ class DocumentAnalyzeView(views.APIView):
         doc.suggested_tasks = analysis_result.get("suggested_tasks", [])
         doc.save()
 
-        # Index document analysis into Team Memory
-        TeamMemoryRAGService.index_chunk(
-            workspace=request.workspace,
-            source_type="document",
-            source_id=str(doc.id),
-            title=f"Document: {doc.file_name}",
-            content=f"Summary: {doc.summary}\n\nKey Findings: {'; '.join(doc.key_findings)}\n\nIssues: {'; '.join(doc.issues)}",
-            metadata={"file_name": doc.file_name, "uploader": request.user.name},
-        )
+        # Index document analysis into Team Memory (executive summary and full content sections)
+        TeamMemoryRAGService.index_document(request.workspace, doc, user=request.user)
 
         return Response({
             "id": doc.id,
@@ -311,3 +349,34 @@ class IndexWorkspaceContentBatchView(views.APIView):
             "message": f"Successfully indexed {indexed_count} items into team memory",
             "indexed_count": indexed_count,
         })
+
+
+class DocumentAnalysisHistoryView(views.APIView):
+    """
+    Returns history of all document analyses performed in this workspace.
+    Restricted strictly to Workspace Admins.
+    """
+    permission_classes = [IsWorkspaceAdmin]
+
+    def get(self, request):
+        analyses = DocumentAnalysis.objects.filter(
+            workspace=request.workspace
+        ).select_related("created_by").order_by("-created_at")
+        serializer = DocumentAnalysisSerializer(analyses, many=True, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class VoiceExtractionHistoryView(views.APIView):
+    """
+    Returns history of all voice and audio task extractions performed in this workspace.
+    Restricted strictly to Workspace Admins.
+    """
+    permission_classes = [IsWorkspaceAdmin]
+
+    def get(self, request):
+        extractions = VoiceExtraction.objects.filter(
+            workspace=request.workspace
+        ).select_related("created_by").order_by("-created_at")
+        serializer = VoiceExtractionSerializer(extractions, many=True, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+

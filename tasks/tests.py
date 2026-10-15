@@ -68,3 +68,55 @@ class TaskManagementTests(TestCase):
         act = TaskActivity.objects.filter(task=task, field_name="status").first()
         self.assertIsNotNone(act)
         self.assertEqual(act.new_value, "in_progress")
+
+    def test_task_attachment_size_limit(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        task = Task.objects.create(
+            workspace=self.workspace,
+            title="Attachment size test",
+            status="todo",
+            creator=self.admin_user,
+        )
+
+        # 6MB file should be rejected
+        oversized = SimpleUploadedFile("big_file.pdf", b"X" * (6 * 1024 * 1024), content_type="application/pdf")
+        res = self.client.post(
+            f"/api/tasks/{task.id}/attachments/",
+            {"file": oversized},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("5MB", res.data["error"])
+
+        # 1MB file should be accepted
+        valid_file = SimpleUploadedFile("valid.pdf", b"X" * (1024 * 1024), content_type="application/pdf")
+        res_ok = self.client.post(
+            f"/api/tasks/{task.id}/attachments/",
+            {"file": valid_file},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res_ok.status_code, status.HTTP_201_CREATED)
+
+    def test_task_attachment_rejects_video_file(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        task = Task.objects.create(
+            workspace=self.workspace,
+            title="Video attachment test",
+            status="todo",
+            creator=self.admin_user,
+        )
+
+        video_file = SimpleUploadedFile("clip.mp4", b"fake mp4 video bytes", content_type="video/mp4")
+        res = self.client.post(
+            f"/api/tasks/{task.id}/attachments/",
+            {"file": video_file},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Video files are not allowed", res.data["error"])
+

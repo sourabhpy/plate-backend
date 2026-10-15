@@ -36,15 +36,81 @@ class TeamMemoryRAGService:
         return chunk
 
     @classmethod
-    def search_similar_chunks(cls, workspace, query_text, user=None, top_k=5):
+    def index_document(cls, workspace, doc, user=None):
+        """
+        Indexes a DocumentAnalysis record into team memory with both high-level executive summary,
+        findings, issues, and content sections so detailed technical rationale and decisions are searchable.
+        """
+        summary_text = (
+            f"Document: {doc.file_name}\n\n"
+            f"Summary: {doc.summary}\n\n"
+            f"Key Findings: {'; '.join(doc.key_findings) if doc.key_findings else 'N/A'}\n\n"
+            f"Flagged Risks: {'; '.join(doc.issues) if doc.issues else 'N/A'}"
+        )
+        # 1. Main synthesis chunk
+        cls.index_chunk(
+            workspace=workspace,
+            source_type="document",
+            source_id=str(doc.id),
+            title=f"Document: {doc.file_name} (Executive Summary)",
+            content=summary_text,
+            metadata={"file_name": doc.file_name, "uploader": user.name if user else (doc.created_by.name if doc.created_by else "")},
+        )
+
+        # 2. Detailed content chunk(s) if extracted text is available
+        if doc.extracted_text and len(doc.extracted_text.strip()) > 50:
+            text = doc.extracted_text.strip()
+            if len(text) <= 5000:
+                cls.index_chunk(
+                    workspace=workspace,
+                    source_type="document",
+                    source_id=f"{doc.id}-content",
+                    title=f"Document Content: {doc.file_name}",
+                    content=f"Document: {doc.file_name}\n\nFull Content:\n{text}",
+                    metadata={"file_name": doc.file_name, "is_full_content": True},
+                )
+            else:
+                chunk_size = 3500
+                overlap = 400
+                pos = 0
+                part = 1
+                while pos < len(text) and part <= 8:
+                    chunk_slice = text[pos:pos + chunk_size]
+                    cls.index_chunk(
+                        workspace=workspace,
+                        source_type="document",
+                        source_id=f"{doc.id}-part-{part}",
+                        title=f"Document Content: {doc.file_name} (Part {part})",
+                        content=f"Document: {doc.file_name} (Section {part})\n\n{chunk_slice}",
+                        metadata={"file_name": doc.file_name, "part": part},
+                    )
+                    pos += (chunk_size - overlap)
+                    part += 1
+
+    @classmethod
+    def reindex_all_workspace_documents(cls, workspace):
+        """
+        Ensures all DocumentAnalysis records in the workspace are indexed with up-to-date embeddings.
+        """
+        from .models import DocumentAnalysis
+        for doc in DocumentAnalysis.objects.filter(workspace=workspace):
+            cls.index_document(workspace, doc, user=doc.created_by)
+
+    @classmethod
+    def search_similar_chunks(cls, workspace, query_text, user=None, top_k=6):
         """
         Calculates cosine similarity between query and stored team memory chunks.
         Strictly enforces workspace isolation and message visibility rules.
+        Includes auto-healing for legacy dimension mismatches and hybrid lexical matching.
         """
+        # Auto-ensure any existing analyzed documents are indexed
+        from .models import DocumentAnalysis
+        if not TeamMemoryChunk.objects.filter(workspace=workspace, source_type="document").exists():
+            if DocumentAnalysis.objects.filter(workspace=workspace).exists():
+                cls.reindex_all_workspace_documents(workspace)
+
         query_vec = np.array(generate_embedding(query_text), dtype=np.float32)
         query_norm = np.linalg.norm(query_vec)
-        if query_norm == 0:
-            return []
 
         chunks = list(TeamMemoryChunk.objects.filter(workspace=workspace))
         if not chunks:
@@ -62,6 +128,9 @@ class TeamMemoryRAGService:
             )
 
         scored_chunks = []
+        # Pre-calculate query keywords for hybrid lexical scoring
+        query_words = set(w.lower().strip("?,.!:;\"'") for w in query_text.split() if len(w) > 3)
+
         for chunk in chunks:
             # Enforce message privacy
             if chunk.source_type == "message":
@@ -70,14 +139,33 @@ class TeamMemoryRAGService:
                     continue
 
             chunk_vec = np.array(chunk.embedding, dtype=np.float32)
-            chunk_norm = np.linalg.norm(chunk_vec)
-            if chunk_norm == 0:
-                continue
+            # Auto-healing: If embedding dimension doesn't match current model (e.g. from previous fallback), re-embed
+            if len(chunk_vec) != len(query_vec):
+                try:
+                    new_emb = generate_embedding(f"{chunk.title}\n{chunk.content}")
+                    chunk.embedding = new_emb
+                    chunk.save(update_fields=["embedding"])
+                    chunk_vec = np.array(new_emb, dtype=np.float32)
+                except Exception as e:
+                    logger.warning(f"Failed to re-embed chunk {chunk.id}: {e}")
+                    chunk_vec = np.array([], dtype=np.float32)
 
-            similarity = float(np.dot(query_vec, chunk_vec) / (query_norm * chunk_norm))
-            scored_chunks.append((similarity, chunk))
+            similarity = 0.0
+            if len(chunk_vec) == len(query_vec) and query_norm > 0:
+                chunk_norm = np.linalg.norm(chunk_vec)
+                if chunk_norm > 0:
+                    similarity = float(np.dot(query_vec, chunk_vec) / (query_norm * chunk_norm))
 
-        # Sort descending by cosine similarity
+            # Hybrid lexical matching boost
+            content_lower = f"{chunk.title} {chunk.content}".lower()
+            matched_words = [w for w in query_words if w in content_lower]
+            lexical_boost = min(len(matched_words) * 0.06, 0.25)
+            final_score = similarity + lexical_boost
+
+            if final_score > 0.15 or len(matched_words) >= 2:
+                scored_chunks.append((final_score, chunk))
+
+        # Sort descending by final score
         scored_chunks.sort(key=lambda x: x[0], reverse=True)
         return scored_chunks[:top_k]
 

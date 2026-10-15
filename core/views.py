@@ -13,6 +13,7 @@ from .serializers import (
     InviteMemberSerializer,
 )
 from .permissions import IsWorkspaceMember, IsWorkspaceAdmin
+from .media_validators import validate_max_file_size, validate_not_video
 
 
 def get_tokens_for_user(user):
@@ -120,7 +121,14 @@ class MeView(views.APIView):
 
         # Handle avatar upload or removal
         if "avatar" in request.FILES:
-            user.avatar = request.FILES["avatar"]
+            avatar_file = request.FILES["avatar"]
+            is_not_video, video_err = validate_not_video(avatar_file)
+            if not is_not_video:
+                return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+            is_valid_size, size_err = validate_max_file_size(avatar_file, label="Avatar image")
+            if not is_valid_size:
+                return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
+            user.avatar = avatar_file
         elif str(request.data.get("remove_avatar")).lower() in ["true", "1", "yes"]:
             if user.avatar:
                 user.avatar.delete(save=False)
@@ -307,6 +315,13 @@ class WorkspaceMembersView(views.APIView):
         title = serializer.validated_data.get("title", "Team Member")
         password = serializer.validated_data.get("password") or request.data.get("password")
         avatar_file = request.FILES.get("avatar")
+        if avatar_file:
+            is_not_video, video_err = validate_not_video(avatar_file)
+            if not is_not_video:
+                return Response({"error": video_err}, status=status.HTTP_400_BAD_REQUEST)
+            is_valid_size, size_err = validate_max_file_size(avatar_file, label="Avatar image")
+            if not is_valid_size:
+                return Response({"error": size_err}, status=status.HTTP_400_BAD_REQUEST)
 
         if not password or len(password) < 6:
             return Response(

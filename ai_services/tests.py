@@ -88,3 +88,159 @@ class AIServicesTests(TestCase):
         self.assertIn("citations", res)
         self.assertTrue(len(res["citations"]) >= 1)
         self.assertEqual(res["citations"][0]["title"], "Postpone Analytics Dashboard")
+
+    def test_admin_can_access_ai_history(self):
+        from ai_services.models import DocumentAnalysis, VoiceExtraction
+
+        # Seed document analysis
+        doc = DocumentAnalysis.objects.create(
+            workspace=self.workspace,
+            file_name="Architecture_Spec.pdf",
+            file_type="application/pdf",
+            summary="System architecture overview",
+            key_findings=["PostgreSQL selected", "pgvector used for RAG"],
+            issues=["Connection limits require PgBouncer"],
+            suggested_tasks=[{"title": "Deploy PgBouncer", "priority": "high"}],
+            created_by=self.user,
+        )
+
+        # Seed voice extraction
+        voice = VoiceExtraction.objects.create(
+            workspace=self.workspace,
+            transcript="We agreed to implement back stack navigation.",
+            decisions=["Use history API pushState"],
+            blockers=[],
+            extracted_tasks=[{"title": "Implement back stack", "priority": "urgent"}],
+            created_by=self.user,
+        )
+
+        # Admin fetches document history
+        self.client.force_authenticate(user=self.user)
+        headers = {"HTTP_X_WORKSPACE_ID": str(self.workspace.id)}
+        res_doc = self.client.get("/api/ai/documents/history/", **headers)
+        self.assertEqual(res_doc.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_doc.data), 1)
+        self.assertEqual(res_doc.data[0]["file_name"], "Architecture_Spec.pdf")
+        self.assertEqual(res_doc.data[0]["summary"], "System architecture overview")
+
+        # Admin fetches voice history
+        res_voice = self.client.get("/api/ai/voice/history/", **headers)
+        self.assertEqual(res_voice.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_voice.data), 1)
+        self.assertEqual(res_voice.data[0]["transcript"], "We agreed to implement back stack navigation.")
+
+    def test_non_admin_forbidden_from_ai_history(self):
+        # Non-admin member (dave) tries to access history
+        self.client.force_authenticate(user=self.dev)
+        headers = {"HTTP_X_WORKSPACE_ID": str(self.workspace.id)}
+
+        res_doc = self.client.get("/api/ai/documents/history/", **headers)
+        self.assertEqual(res_doc.status_code, status.HTTP_403_FORBIDDEN)
+
+        res_voice = self.client.get("/api/ai/voice/history/", **headers)
+        self.assertEqual(res_voice.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_voice_extraction_rejects_audio_greater_than_5mb(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        oversized = SimpleUploadedFile("long_audio.webm", b"0" * (6 * 1024 * 1024), content_type="audio/webm")
+        res = self.client.post(
+            "/api/ai/voice/transcribe-extract/",
+            {"audio": oversized},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("5MB", res.data["error"])
+
+    def test_voice_extraction_rejects_multiple_audio_files(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        audio1 = SimpleUploadedFile("audio1.webm", b"fake audio 1", content_type="audio/webm")
+        audio2 = SimpleUploadedFile("audio2.webm", b"fake audio 2", content_type="audio/webm")
+        res = self.client.post(
+            "/api/ai/voice/transcribe-extract/",
+            {"audio": audio1, "extra_file": audio2},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Only one audio file", res.data["error"])
+
+    def test_voice_extraction_rejects_audio_longer_than_1_minute(self):
+        from unittest.mock import patch
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        audio = SimpleUploadedFile("speech.webm", b"valid audio data", content_type="audio/webm")
+
+        with patch("ai_services.views.get_audio_duration_seconds", return_value=75.0):
+            res = self.client.post(
+                "/api/ai/voice/transcribe-extract/",
+                {"audio": audio},
+                format="multipart",
+                HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+            )
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertIn("1-minute limit", res.data["error"])
+
+    def test_document_analysis_rejects_file_greater_than_5mb(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        oversized = SimpleUploadedFile("huge_doc.pdf", b"0" * (6 * 1024 * 1024), content_type="application/pdf")
+        res = self.client.post(
+            "/api/ai/documents/analyze/",
+            {"file": oversized},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("5MB", res.data["error"])
+
+    def test_document_analysis_rejects_multiple_files(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        f1 = SimpleUploadedFile("doc1.pdf", b"pdf1", content_type="application/pdf")
+        f2 = SimpleUploadedFile("doc2.pdf", b"pdf2", content_type="application/pdf")
+        res = self.client.post(
+            "/api/ai/documents/analyze/",
+            {"file": f1, "extra": f2},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Only one document", res.data["error"])
+
+    def test_voice_extraction_rejects_video_file(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        video_file = SimpleUploadedFile("demo.mp4", b"fake video bytes", content_type="video/mp4")
+        res = self.client.post(
+            "/api/ai/voice/transcribe-extract/",
+            {"audio": video_file},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Video files are not allowed", res.data["error"])
+
+    def test_document_analysis_rejects_video_file(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(user=self.user)
+        video_file = SimpleUploadedFile("recording.mov", b"fake video bytes", content_type="video/quicktime")
+        res = self.client.post(
+            "/api/ai/documents/analyze/",
+            {"file": video_file},
+            format="multipart",
+            HTTP_X_WORKSPACE_ID=str(self.workspace.id),
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Video files are not allowed", res.data["error"])
+
+
